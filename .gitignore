@@ -20,4 +20,5 @@ prompts
 drafts
 script.py
 scripts/models
-sf_fold_npz/
+sf_fold_npz_old/
+sf_fold_npz_cumulative/
