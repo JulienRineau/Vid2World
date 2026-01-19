@@ -118,83 +118,91 @@ model:
 data:
   target: utils_data.DataModuleFromConfig
   params:
-    batch_size: 3
-    num_workers: 12
+    batch_size: 1  # Single sample per GPU for overfit test
+    num_workers: 4  # Reduced workers for small dataset
     wrap: false
     train:
       target: lvdm.data.sf_fold_vid.SFFoldVid
       params:
-        data_dir: |<your_data_dir>|
+        data_dir: /home/ubuntu/Texas/personal/Vid2World/human_fold_npz
         video_length: 16
         resolution: [320, 512]
         spatial_transform: resize_center_crop
         strong_augmentation: False
         mode: 'training'
-        augment_data: True
+        augment_data: False  # Disable augmentation for overfit test
         subsample: False
-        val_file_list_path: |<your_data_dir>|/val_file_list.json
-        action_stats_path: |<your_data_dir>|/action_stats.json
+        max_samples: 4  # Only use 4 samples for overfit test
+        val_file_list_path: /home/ubuntu/Texas/personal/Vid2World/human_fold_npz/val_file_list.json
+        action_stats_path: /home/ubuntu/Texas/personal/Vid2World/human_fold_npz/action_stats.json
     validation:
       target: lvdm.data.sf_fold_vid.SFFoldVid
       params:
-        data_dir: |<your_data_dir>|
+        data_dir: /home/ubuntu/Texas/personal/Vid2World/human_fold_npz
         video_length: 16
         resolution: [320, 512]
         spatial_transform: resize_center_crop
         strong_augmentation: False
         mode: 'validation'
         augment_data: False
-        subsample: True
-        val_file_list_path: |<your_data_dir>|/val_file_list.json
-        action_stats_path: |<your_data_dir>|/action_stats.json
+        subsample: False
+        max_samples: 4  # Only use 4 samples for overfit test
+        val_file_list_path: /home/ubuntu/Texas/personal/Vid2World/human_fold_npz/val_file_list.json
+        action_stats_path: /home/ubuntu/Texas/personal/Vid2World/human_fold_npz/action_stats.json
 
 lightning:
-  precision: bf16-mixed
+  precision: bf16
   trainer:
     benchmark: True
-    accumulate_grad_batches: 2
-    max_steps: 50000
-    log_every_n_steps: 50
-    val_check_interval: 0.5
+    accumulate_grad_batches: 1  # No gradient accumulation for overfit test
+    max_steps: 500  # Short run for pipeline validation
+    log_every_n_steps: 10  # Frequent logging to track overfit progress
+    limit_val_batches: 0.0  # Disable validation for overfit test (only 4 samples)
     gradient_clip_algorithm: 'norm'
     gradient_clip_val: 0.5
   callbacks:
     model_checkpoint:
       target: pytorch_lightning.callbacks.ModelCheckpoint
       params:
-        every_n_train_steps: 1000
+        every_n_train_steps: 200  # Save checkpoint at step 200
         filename: "{epoch}-{step}"
         save_weights_only: True
-    metrics_over_trainsteps_checkpoint:
-      target: pytorch_lightning.callbacks.ModelCheckpoint
-      params:
-        filename: '{epoch}-{step}'
-        save_weights_only: True
-        every_n_train_steps: 10000
     batch_logger:
       target: callbacks.ImageLogger
       params:
-        batch_frequency: 5000
+        batch_frequency: 100  # Log every 100 steps
         to_local: False
-        max_images: 8
+        max_images: 4
+        log_to_wandb: True
+        num_wandb_videos: 4
         log_images_kwargs:
           ar: False
           ddim_steps: 50
           unconditional_guidance_scale: 2.5
           timestep_spacing: uniform_trailing
           guidance_rescale: 0.7
-    metrics_logger:
-      target: callbacks.MetricsLogger
-      params:
-        log_every_n_train_steps: 5000
-        buffer_size: 16
-        i3d_model_path: '../checkpoints/i3d/i3d_torchscript.pt'
-        max_batchsize: 2
-        save_dir: |<your_save_dir>|
-        log_images_kwargs:
-          ar: False
-          ddim_steps: 50
-          unconditional_guidance_scale: 2.5
-          timestep_spacing: uniform_trailing
-          guidance_rescale: 0.7
-        evaluate: True
+    # Disable expensive FVD/FID metrics for overfit test
+    # metrics_logger:
+    #   target: callbacks.MetricsLogger
+    #   params:
+    #     log_every_n_train_steps: 500
+    #     buffer_size: 4
+    #     i3d_model_path: '../checkpoints/i3d/i3d_torchscript.pt'
+    #     max_batchsize: 2
+    #     save_dir: "<your_save_dir>"
+    #     log_images_kwargs:
+    #       ar: False
+    #       ddim_steps: 50
+    #       unconditional_guidance_scale: 2.5
+    #       timestep_spacing: uniform_trailing
+    #       guidance_rescale: 0.7
+    #     evaluate: False
+  wandb:
+    enabled: true  # Enable wandb logging
+    project: "vid2world-human-fold"
+    entity: null
+    tags: ["human", "bimanual", "overfit_test"]
+    notes: "Overfit test on 4 samples to validate human fold pipeline"
+    resume: "allow"
+    log_model: false
+    save_code: true

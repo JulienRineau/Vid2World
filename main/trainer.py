@@ -30,11 +30,25 @@ def get_parser(**parser_kwargs):
 
     return parser
     
-def get_nondefault_trainer_args(args):
-    parser = argparse.ArgumentParser()
-    parser = Trainer.add_argparse_args(parser)
-    default_trainer_args = parser.parse_args([])
-    return sorted(k for k in vars(default_trainer_args) if getattr(args, k) != getattr(default_trainer_args, k))
+def get_nondefault_trainer_args(args, trainer_config):
+    """Get trainer args that were passed via command line and differ from config defaults.
+
+    For Lightning 2.x compatibility, we check known trainer args instead of using
+    the removed Trainer.add_argparse_args() method.
+    """
+    # Common trainer args that might be overridden via command line
+    known_trainer_args = ['devices', 'num_nodes', 'accelerator', 'strategy', 'precision',
+                          'max_epochs', 'max_steps', 'accumulate_grad_batches', 'gradient_clip_val',
+                          'gradient_clip_algorithm', 'benchmark', 'limit_val_batches']
+
+    result = []
+    for k in known_trainer_args:
+        if hasattr(args, k) and getattr(args, k) is not None:
+            # Check if it differs from config default
+            config_val = trainer_config.get(k) if hasattr(trainer_config, 'get') else getattr(trainer_config, k, None)
+            if config_val != getattr(args, k):
+                result.append(k)
+    return sorted(result)
 
 
 if __name__ == "__main__":
@@ -44,8 +58,10 @@ if __name__ == "__main__":
     num_rank = int(os.environ.get('WORLD_SIZE'))
 
     parser = get_parser()
-    ## Extends existing argparse by default Trainer attributes
-    parser = Trainer.add_argparse_args(parser)
+    ## Add common trainer arguments manually (Lightning 2.x compatibility)
+    parser.add_argument("--devices", type=int, default=None, help="Number of devices to use")
+    parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes for distributed training")
+    parser.add_argument("--accelerator", type=str, default="gpu", help="Accelerator type (gpu, cpu, etc.)")
     args, unknown = parser.parse_known_args()
     ## disable transformer warning
     transf_logging.set_verbosity_error()
@@ -79,8 +95,8 @@ if __name__ == "__main__":
         model.register_schedule(given_betas=model.given_betas, beta_schedule=model.beta_schedule, timesteps=model.timesteps,
                                 linear_start=model.linear_start, linear_end=model.linear_end, cosine_s=model.cosine_s)
 
-    ## update trainer config
-    for k in get_nondefault_trainer_args(args):
+    ## update trainer config from command line args
+    for k in get_nondefault_trainer_args(args, trainer_config):
         trainer_config[k] = getattr(args, k)
         
     num_nodes = trainer_config.num_nodes
@@ -112,8 +128,16 @@ if __name__ == "__main__":
     ## setup trainer args: pl-logger and callbacks
     trainer_kwargs = dict()
     trainer_kwargs["num_sanity_val_steps"] = 0
-    logger_cfg = get_trainer_logger(lightning_config, workdir, args.debug)
-    trainer_kwargs["logger"] = instantiate_from_config(logger_cfg)
+
+    # Get logger(s) - may return single config or list of configs (tensorboard + wandb)
+    logger_cfg = get_trainer_logger(lightning_config, workdir, args.debug, name=args.name, rank=global_rank)
+    if isinstance(logger_cfg, list):
+        # Multiple loggers (tensorboard + wandb)
+        trainer_kwargs["logger"] = [instantiate_from_config(cfg) for cfg in logger_cfg]
+        logger.info(f"Using {len(logger_cfg)} loggers: {[cfg.get('target', 'unknown').split('.')[-1] for cfg in logger_cfg]}")
+    else:
+        # Single logger (tensorboard only)
+        trainer_kwargs["logger"] = instantiate_from_config(logger_cfg)
     
     ## setup callbacks
     callbacks_cfg = get_trainer_callbacks(lightning_config, config, workdir, ckptdir, logger)
@@ -123,10 +147,9 @@ if __name__ == "__main__":
     trainer_kwargs['precision'] = lightning_config.get('precision', 32)
     trainer_kwargs["sync_batchnorm"] = False
 
-    ## trainer config: others
-
-    trainer_args = argparse.Namespace(**trainer_config)
-    trainer = Trainer.from_argparse_args(trainer_args, **trainer_kwargs)
+    ## trainer config: others (Lightning 2.x uses direct kwargs instead of from_argparse_args)
+    trainer_config_dict = dict(trainer_config)  # Convert OmegaConf to dict
+    trainer = Trainer(**trainer_config_dict, **trainer_kwargs)
 
     ## allow checkpointing via USR1
     def melk(*args, **kwargs):

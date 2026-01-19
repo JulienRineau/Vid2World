@@ -1,0 +1,191 @@
+# Vid2World Human Fold - Training and Inference Commands
+# ======================================================
+#
+# This file contains all commands for training the world model and
+# generating inference videos for the blog post.
+
+# =========================================================================
+# TRAINING
+# =========================================================================
+
+# 8-GPU training on human fold dataset
+# - Uses DynamiCrafter pretrained weights as initialization
+# - Trains on 5,248 episodes of bimanual t-shirt folding
+# - 320x512 resolution, 16 frames per episode
+./main/trainer.py \
+    --local-rank=0 \
+    --base configs/manipulation/config_human_fold_train.yaml \
+    --train \
+    --name human_fold_v1 \
+    --logdir /home/ubuntu/Texas/personal/Vid2World/logs \
+    --devices 8 \
+    lightning.trainer.num_nodes=1
+
+# Resume training from checkpoint (if interrupted)
+./main/trainer.py \
+    --local-rank=0 \
+    --base configs/manipulation/config_human_fold_train.yaml \
+    --train \
+    --name human_fold_v1 \
+    --logdir /home/ubuntu/Texas/personal/Vid2World/logs \
+    --devices 8 \
+    --resume_from_checkpoint /home/ubuntu/Texas/personal/Vid2World/logs/human_fold_v1/checkpoints/epoch=449-step=44500.ckpt
+
+# Single-GPU training (for testing/debugging)
+./main/trainer.py \
+    --local-rank=0 \
+    --base configs/manipulation/config_human_fold_train.yaml \
+    --train \
+    --name human_fold_v1_debug \
+    --logdir /home/ubuntu/Texas/personal/Vid2World/logs \
+    --devices 1
+
+
+# =========================================================================
+# INFERENCE - COMPARISON VIDEO
+# =========================================================================
+# Generates side-by-side video: Initial Frame | Ground Truth | Model Prediction
+# This is the "wow effect" opening video for the blog post
+
+# Basic usage (4 samples, default settings)
+python inference_comparison.py \
+    --checkpoint logs/human_fold_v1/checkpoints/epoch=449-step=44500.ckpt \
+    --config configs/manipulation/config_human_fold_test.yaml \
+    --output outputs/comparison_video.mp4 \
+    --num_samples 4
+
+# Higher quality (more DDIM steps, autoregressive generation)
+python inference_comparison.py \
+    --checkpoint logs/human_fold_v1/checkpoints/epoch=449-step=44500.ckpt \
+    --config configs/manipulation/config_human_fold_test.yaml \
+    --output outputs/comparison_video_ar.mp4 \
+    --num_samples 4 \
+    --ddim_steps 100 \
+    --guidance_scale 3.0 \
+    --ar \
+    --fps 4
+
+# With text labels (requires ffmpeg)
+python inference_comparison.py \
+    --checkpoint logs/human_fold_v1/checkpoints/epoch=449-step=44500.ckpt \
+    --config configs/manipulation/config_human_fold_test.yaml \
+    --output outputs/comparison_video.mp4 \
+    --num_samples 4 \
+    --add_labels
+
+# Different seed for variety
+python inference_comparison.py \
+    --checkpoint logs/human_fold_v1/checkpoints/epoch=449-step=44500.ckpt \
+    --config configs/manipulation/config_human_fold_test.yaml \
+    --output outputs/comparison_video_seed123.mp4 \
+    --num_samples 4 \
+    --seed 123
+
+
+# =========================================================================
+# INFERENCE - ACTION CROSS-SWAP GRID
+# =========================================================================
+# Generates 2x2 grid proving action-conditioned generation:
+#   Top-left:     Frame A + Actions A (expected behavior)
+#   Top-right:    Frame A + Actions B (cross-swap - proves action following)
+#   Bottom-left:  Frame B + Actions A (cross-swap - proves action following)
+#   Bottom-right: Frame B + Actions B (expected behavior)
+
+# Basic usage (episodes 0 and 10)
+python inference_crossswap.py \
+    --checkpoint logs/human_fold_v1/checkpoints/epoch=449-step=44500.ckpt \
+    --config configs/manipulation/config_human_fold_test.yaml \
+    --output outputs/crossswap_grid.mp4 \
+    --episode_a_idx 0 \
+    --episode_b_idx 10
+
+# With autoregressive generation (higher quality)
+python inference_crossswap.py \
+    --checkpoint logs/human_fold_v1/checkpoints/epoch=449-step=44500.ckpt \
+    --config configs/manipulation/config_human_fold_test.yaml \
+    --output outputs/crossswap_grid_ar.mp4 \
+    --episode_a_idx 0 \
+    --episode_b_idx 10 \
+    --ddim_steps 100 \
+    --guidance_scale 3.0 \
+    --ar
+
+# Include ground truth column (2x3 grid)
+python inference_crossswap.py \
+    --checkpoint logs/human_fold_v1/checkpoints/epoch=449-step=44500.ckpt \
+    --config configs/manipulation/config_human_fold_test.yaml \
+    --output outputs/crossswap_grid_with_gt.mp4 \
+    --episode_a_idx 0 \
+    --episode_b_idx 10 \
+    --include_gt
+
+# With text labels (requires ffmpeg)
+python inference_crossswap.py \
+    --checkpoint logs/human_fold_v1/checkpoints/epoch=449-step=44500.ckpt \
+    --config configs/manipulation/config_human_fold_test.yaml \
+    --output outputs/crossswap_grid.mp4 \
+    --episode_a_idx 0 \
+    --episode_b_idx 10 \
+    --add_labels
+
+# Try different episode combinations for visual variety
+# Pick episodes with visually distinct actions (e.g., large vs small movements)
+python inference_crossswap.py \
+    --checkpoint logs/human_fold_v1/checkpoints/epoch=449-step=44500.ckpt \
+    --config configs/manipulation/config_human_fold_test.yaml \
+    --output outputs/crossswap_grid_v2.mp4 \
+    --episode_a_idx 5 \
+    --episode_b_idx 25
+
+
+# =========================================================================
+# EVALUATION (optional)
+# =========================================================================
+
+# Run quantitative metrics evaluation
+python eval.py \
+    --exp_folder outputs/eval_results \
+    --env human_fold \
+    --device cuda:0
+
+
+# =========================================================================
+# TIPS FOR BEST RESULTS
+# =========================================================================
+
+# 1. Episode Selection for Cross-Swap:
+#    - Choose episodes with DIFFERENT action patterns
+#    - One with large hand movements, one with small/precise movements
+#    - This makes the cross-swap effect more visually apparent
+
+# 2. Guidance Scale:
+#    - Default 2.5 is good for general quality
+#    - Higher (3.0-4.0) increases action following but may reduce diversity
+#    - Lower (1.5-2.0) more diverse but weaker action conditioning
+
+# 3. DDIM Steps:
+#    - 50 steps is good balance of quality/speed
+#    - 100 steps for final blog post videos
+#    - 25 steps for quick testing
+
+# 4. Autoregressive vs Non-AR:
+#    - AR (--ar flag) gives more coherent temporal dynamics
+#    - Non-AR is faster but may have temporal artifacts
+#    - Use AR for final blog post videos
+
+# 5. Output FPS:
+#    - 3-4 fps is typical for manipulation videos
+#    - Matches the original data collection framerate
+#    - Higher fps looks smoother but may seem "fast"
+
+
+# =========================================================================
+# CHECKPOINT PATHS
+# =========================================================================
+# After training, checkpoints will be at:
+#   logs/human_fold_v1/checkpoints/
+#     ├── last.ckpt              # Most recent checkpoint
+#     ├── epoch-X-step-XXXXX.ckpt  # Periodic checkpoints
+#     └── ...
+#
+# Use the best checkpoint based on validation metrics from training logs

@@ -4,6 +4,15 @@ import logging
 mainlogger = logging.getLogger('mainlogger')
 
 import torch
+
+# Try to import wandb - optional dependency
+try:
+    import wandb
+    from pytorch_lightning.loggers import WandbLogger
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    mainlogger.warning("wandb not installed. Run 'pip install wandb' for experiment tracking.")
 from collections import OrderedDict
 from lvdm.basics import CausalConv1d, CausalConv2d, CausalConv3d
 import numpy as np
@@ -114,7 +123,22 @@ def get_trainer_callbacks(lightning_config, config, logdir, ckptdir, logger):
 
     return callbacks_cfg
 
-def get_trainer_logger(lightning_config, logdir, on_debug):
+def get_trainer_logger(lightning_config, logdir, on_debug, name=None, rank=0):
+    """
+    Get trainer logger configuration(s).
+
+    Returns tensorboard config by default, plus wandb config if enabled.
+
+    Args:
+        lightning_config: Lightning configuration
+        logdir: Log directory path
+        on_debug: Debug mode flag
+        name: Experiment name for wandb
+        rank: Process rank for distributed training
+
+    Returns:
+        List of logger configs or single logger config
+    """
     default_logger_cfgs = {
         "tensorboard": {
             "target": "pytorch_lightning.loggers.TensorBoardLogger",
@@ -138,20 +162,148 @@ def get_trainer_logger(lightning_config, logdir, on_debug):
     else:
         logger_cfg = OmegaConf.create()
     logger_cfg = OmegaConf.merge(default_logger_cfg, logger_cfg)
+
+    # Check if wandb is enabled
+    wandb_cfg = get_wandb_logger_config(lightning_config, logdir, name, rank)
+    if wandb_cfg is not None:
+        return [logger_cfg, wandb_cfg]
+
     return logger_cfg
 
-def get_trainer_strategy(lightning_config):
-    default_strategy_dict = {
-        "target": "pytorch_lightning.strategies.DDPShardedStrategy"
+
+def get_wandb_logger_config(lightning_config, logdir, name=None, rank=0):
+    """
+    Get wandb logger configuration if enabled.
+
+    Args:
+        lightning_config: Lightning configuration with optional 'wandb' section
+        logdir: Log directory path
+        name: Experiment name
+        rank: Process rank for distributed training
+
+    Returns:
+        WandbLogger config dict or None if disabled/unavailable
+    """
+    # Check if wandb is available
+    if not WANDB_AVAILABLE:
+        return None
+
+    # Check if wandb is enabled in config
+    wandb_config = check_config_attribute(lightning_config, "wandb")
+    if wandb_config is None:
+        return None
+
+    enabled = check_config_attribute(wandb_config, "enabled")
+    if not enabled:
+        mainlogger.info("Wandb logging disabled in config")
+        return None
+
+    # Get wandb configuration parameters
+    project = check_config_attribute(wandb_config, "project") or "vid2world"
+    entity = check_config_attribute(wandb_config, "entity")  # Can be None for personal workspace
+    tags = check_config_attribute(wandb_config, "tags") or []
+    notes = check_config_attribute(wandb_config, "notes") or ""
+    resume = check_config_attribute(wandb_config, "resume") or "allow"
+    log_model = check_config_attribute(wandb_config, "log_model") or False
+    save_code = check_config_attribute(wandb_config, "save_code") or True
+
+    # Convert OmegaConf list to Python list if needed
+    if hasattr(tags, '__iter__') and not isinstance(tags, (list, str)):
+        tags = list(tags)
+
+    # Only initialize on rank 0
+    if rank != 0:
+        mainlogger.info(f"Skipping wandb init on rank {rank}")
+        return None
+
+    mainlogger.info(f"Initializing wandb logger: project={project}, name={name}")
+
+    wandb_logger_cfg = {
+        "target": "pytorch_lightning.loggers.WandbLogger",
+        "params": {
+            "project": project,
+            "name": name,
+            "save_dir": logdir,
+            "tags": tags,
+            "notes": notes,
+            "resume": resume,
+            "log_model": log_model,
+        }
     }
+
+    if entity is not None:
+        wandb_logger_cfg["params"]["entity"] = entity
+
+    return wandb_logger_cfg
+
+
+def init_wandb(lightning_config, model_config, name, logdir, rank=0):
+    """
+    Initialize wandb run on rank 0 only.
+
+    This should be called before trainer initialization to ensure
+    hyperparameters are logged correctly.
+
+    Args:
+        lightning_config: Lightning configuration
+        model_config: Model configuration (for hyperparameter logging)
+        name: Experiment name
+        logdir: Log directory
+        rank: Process rank
+
+    Returns:
+        wandb run object or None
+    """
+    if not WANDB_AVAILABLE:
+        return None
+
+    wandb_config = check_config_attribute(lightning_config, "wandb")
+    if wandb_config is None or not check_config_attribute(wandb_config, "enabled"):
+        return None
+
+    if rank != 0:
+        return None
+
+    project = check_config_attribute(wandb_config, "project") or "vid2world"
+    entity = check_config_attribute(wandb_config, "entity")
+    tags = check_config_attribute(wandb_config, "tags") or []
+    notes = check_config_attribute(wandb_config, "notes") or ""
+    resume = check_config_attribute(wandb_config, "resume") or "allow"
+    save_code = check_config_attribute(wandb_config, "save_code") or True
+
+    # Convert OmegaConf to dict for wandb config
+    config_dict = {
+        "model": OmegaConf.to_container(model_config, resolve=True),
+        "lightning": OmegaConf.to_container(lightning_config, resolve=True),
+    }
+
+    run = wandb.init(
+        project=project,
+        entity=entity,
+        name=name,
+        dir=logdir,
+        tags=list(tags) if not isinstance(tags, list) else tags,
+        notes=notes,
+        resume=resume,
+        save_code=save_code,
+        config=config_dict,
+    )
+
+    mainlogger.info(f"Wandb initialized: {run.url}")
+    return run
+
+def get_trainer_strategy(lightning_config):
+    """Get trainer strategy configuration for Lightning 2.x.
+
+    Returns 'ddp' string by default for standard DDP training.
+    DDPShardedStrategy was removed in Lightning 2.x.
+    """
     if "strategy" in lightning_config:
         strategy_cfg = lightning_config.strategy
         return strategy_cfg
     else:
-        strategy_cfg = OmegaConf.create()
-
-    strategy_cfg = OmegaConf.merge(default_strategy_dict, strategy_cfg)
-    return strategy_cfg
+        # Default to simple DDP strategy (works with Lightning 2.x)
+        return "ddp"
 
 def load_checkpoints(model, model_cfg):
     if check_config_attribute(model_cfg, "pretrained_checkpoint"):
@@ -197,6 +349,7 @@ def load_checkpoints_causal(model, model_cfg):
                     model.load_state_dict(state_dict, strict=True)
                 except:
                     new_pl_sd = OrderedDict()
+                    renamed_count = 0
                     for k, v in state_dict.items():
                         if "temopral_conv" in k and "conv" in k and any(x in k for x in ["1", "2", "3", "4"]):
                             # detect convolution layer type and rename
@@ -211,7 +364,7 @@ def load_checkpoints_causal(model, model_cfg):
                                     # create new key with correct convolution type
                                     new_key = k.replace(".weight", f".{conv_type}.weight").replace(".bias", f".{conv_type}.bias")
                                     new_pl_sd[new_key] = v
-                                    print(f"Renamed {k} -> {new_key}")
+                                    renamed_count += 1
                                     continue
                         # handle output layer keys
                         if "model.diffusion_model.out.2.weight" in k:
@@ -221,14 +374,16 @@ def load_checkpoints_causal(model, model_cfg):
                                 v = extrapolative_weight_transfer(k, "conv2d", v)
                             new_key = k.replace("weight", "conv2d.weight")
                             new_pl_sd[new_key] = v
-                            print(f"Renamed {k} -> {new_key}")
+                            renamed_count += 1
                             continue
                         if "model.diffusion_model.out.2.bias" in k:
                             new_key = k.replace("bias", "conv2d.bias")
                             new_pl_sd[new_key] = v
-                            print(f"Renamed {k} -> {new_key}")
+                            renamed_count += 1
                             continue
                         new_pl_sd[k] = v
+                    if renamed_count > 0:
+                        mainlogger.info(f"Renamed {renamed_count} checkpoint keys for causal attention compatibility")
                     try:
                         model.load_state_dict(new_pl_sd, strict=True)
                     except:
@@ -243,6 +398,7 @@ def load_checkpoints_causal(model, model_cfg):
             else:
                 # deepspeed
                 new_pl_sd = OrderedDict()
+                renamed_count = 0
                 for key in pl_sd['module'].keys():
                     new_pl_sd[key[16:]]=pl_sd['module'][key]
                     for k, v in new_pl_sd.items():
@@ -258,7 +414,7 @@ def load_checkpoints_causal(model, model_cfg):
                                     # create new key with correct convolution type
                                     new_key = k.replace(".weight", f".{conv_type}.weight").replace(".bias", f".{conv_type}.bias")
                                     new_pl_sd[new_key] = v
-                                    print(f"Renamed {k} -> {new_key}")
+                                    renamed_count += 1
                                     continue
                         # handle output layer keys
                         if "model.diffusion_model.out.2.weight" in k:
@@ -268,25 +424,27 @@ def load_checkpoints_causal(model, model_cfg):
                                 v = extrapolative_weight_transfer(k, "conv2d", v)
                             new_key = k.replace("weight", "conv2d.weight")
                             new_pl_sd[new_key] = v
-                            print(f"Renamed {k} -> {new_key}")
+                            renamed_count += 1
                             continue
                         if "model.diffusion_model.out.2.bias" in k:
                             new_key = k.replace("bias", "conv2d.bias")
                             new_pl_sd[new_key] = v
-                            print(f"Renamed {k} -> {new_key}")
+                            renamed_count += 1
                             continue
                         new_pl_sd[k] = v
-                    try:
-                        model.load_state_dict(new_pl_sd, strict=True)
-                    except:
-                        missing_keys, unexpected_keys = model.load_state_dict(new_pl_sd, strict=False)
-                        mainlogger.info(">>> Loaded weights from pretrained checkpoint: %s"%pretrained_ckpt)
-                        mainlogger.info(f"Missing keys: {missing_keys}")
-                        mainlogger.info(f"Unexpected keys: {unexpected_keys}")
-                        assert all(
-                            ("action_emb_proj" in item or "action_emb_preprocess" in item)
-                            for item in missing_keys
-                        )
+                if renamed_count > 0:
+                    mainlogger.info(f"Renamed {renamed_count} checkpoint keys for causal attention compatibility (deepspeed)")
+                try:
+                    model.load_state_dict(new_pl_sd, strict=True)
+                except:
+                    missing_keys, unexpected_keys = model.load_state_dict(new_pl_sd, strict=False)
+                    mainlogger.info(">>> Loaded weights from pretrained checkpoint: %s"%pretrained_ckpt)
+                    mainlogger.info(f"Missing keys: {missing_keys}")
+                    mainlogger.info(f"Unexpected keys: {unexpected_keys}")
+                    assert all(
+                        ("action_emb_proj" in item or "action_emb_preprocess" in item)
+                        for item in missing_keys
+                    )
         except:
             model.load_state_dict(pl_sd)
     else:
@@ -312,7 +470,6 @@ def set_logger(logfile, name='mainlogger'):
 def masked_weight_transfer(key, conv_type, value):
     # determine convnd: always in the form of conv1d, conv2d, conv3d
     N=int(conv_type[4])
-    print(f"Convtype: {conv_type}, N: {N}")
     # determine whether it's weight or bias
     if key.endswith(".bias"):
         return value

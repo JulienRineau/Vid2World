@@ -4,10 +4,12 @@
 __pycache__
 *.egg-info
 
-checkpoints
+checkpoints/
 results
 backup
 LOG
+logs/
+outputs/
 log_*/
 *.log
 prompts/512_rt1_valid_new_44k/
@@ -22,3 +24,8 @@ script.py
 scripts/models
 sf_fold_npz_old/
 sf_fold_npz_cumulative/
+human_fold_npz/
+human_folds_lerobot/
+human_fold_npz_test/
+trossen_fold_npz_cumulative/
+trossen_fold_npz_old/

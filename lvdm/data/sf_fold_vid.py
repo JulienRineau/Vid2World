@@ -54,6 +54,7 @@ class SFFoldVid(Dataset):
                  strong_augmentation=False,
                  val_file_list_path=None,
                  action_stats_path=None,
+                 max_samples=None,  # Limit dataset size for overfit testing
                  ):
         self.data_dir = data_dir
         self.video_length = video_length
@@ -92,12 +93,13 @@ class SFFoldVid(Dataset):
             with open(self.val_file_list_path, 'r') as f:
                 self.val_file_set = set(json.load(f))
 
-        print(f'Current directory: {os.getcwd()}')
-        print(f'Does val_file_list_path exist? {os.path.exists(self.val_file_list_path) if self.val_file_list_path else False}')
-        print(f'val_file_list_path: {self.val_file_list_path}')
-
         # Load all npz files
         self._load_metadata()
+
+        # Apply max_samples limit for overfit testing
+        self.max_samples = max_samples
+        if self.max_samples is not None and self.max_samples > 0:
+            self.file_list = self.file_list[:self.max_samples]
 
         if spatial_transform is not None:
             if spatial_transform == "random_crop":
@@ -130,12 +132,8 @@ class SFFoldVid(Dataset):
                 self.action_std = np.array(stats['std'], dtype=np.float32)
                 # Prevent division by zero
                 self.action_std = np.maximum(self.action_std, 1e-6)
-                print(f'Loaded action stats from {self.action_stats_path}')
-                print(f'Action mean shape: {self.action_mean.shape}, std shape: {self.action_std.shape}')
         else:
             # Default: no normalization (identity transform)
-            print(f'Warning: action_stats_path not found at {self.action_stats_path}')
-            print('Using identity normalization (mean=0, std=1)')
             self.action_mean = np.zeros(20, dtype=np.float32)
             self.action_std = np.ones(20, dtype=np.float32)
 
@@ -173,7 +171,6 @@ class SFFoldVid(Dataset):
         if self.subsample:
             self.file_list = self.file_list[:16]  # Use 16 videos for quick testing
 
-        print(f'{self.mode} set size: {len(self.file_list)} episode files.')
 
     def __getitem__(self, index):
         # Find which file to load based on index

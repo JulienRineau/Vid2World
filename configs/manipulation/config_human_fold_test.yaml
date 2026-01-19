@@ -1,5 +1,7 @@
 model:
-  pretrained_checkpoint: |<your_pretrained_checkpoint>|
+  # For inference, point to your trained checkpoint, e.g.:
+  # pretrained_checkpoint: /home/ubuntu/Texas/personal/Vid2World/logs/human_fold_v1/checkpoints/epoch-X-step-XXXXX.ckpt
+  pretrained_checkpoint: checkpoints/dynamicrafter_512_v1/model.ckpt  # Default for testing setup
   base_learning_rate: 5.0e-06
   scale_lr: False
   target: lvdm.models.ddpm3d.LatentVisualDiffusion
@@ -124,7 +126,7 @@ data:
     validation:
       target: lvdm.data.sf_fold_vid.SFFoldVid
       params:
-        data_dir: |<your_data_dir>|
+        data_dir: /home/ubuntu/Texas/personal/Vid2World/human_fold_npz
         video_length: 16
         resolution: [320, 512]
         spatial_transform: resize_center_crop
@@ -132,8 +134,8 @@ data:
         mode: 'validation'
         augment_data: False
         subsample: False
-        val_file_list_path: |<your_data_dir>|/val_file_list.json
-        action_stats_path: |<your_data_dir>|/action_stats.json
+        val_file_list_path: /home/ubuntu/Texas/personal/Vid2World/human_fold_npz/val_file_list.json
+        action_stats_path: /home/ubuntu/Texas/personal/Vid2World/human_fold_npz/action_stats.json
 
 lightning:
   precision: bf16-mixed
@@ -165,7 +167,7 @@ lightning:
         buffer_size: 16
         i3d_model_path: '../checkpoints/i3d/i3d_torchscript.pt'
         max_batchsize: 2
-        save_dir: |<your_save_dir>|
+        save_dir: /home/ubuntu/Texas/personal/Vid2World/logs
         log_images_kwargs:
           ar: True
           cond_frame: 1

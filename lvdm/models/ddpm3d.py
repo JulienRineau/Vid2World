@@ -1047,15 +1047,10 @@ class LatentDiffusion(DDPM):
     
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
-        pass
-        '''
         _, loss_dict_no_ema = self.shared_step(batch, random_uncond=False)
-        with self.ema_scope():
-            _, loss_dict_ema = self.shared_step(batch, random_uncond=False)
-            loss_dict_ema = {key + '_ema': loss_dict_ema[key] for key in loss_dict_ema}
-        self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
-        self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
-        '''        
+        # Rename keys to have val/ prefix for clarity
+        val_loss_dict = {f"val/{k.replace('train/', '')}": v for k, v in loss_dict_no_ema.items()}
+        self.log_dict(val_loss_dict, prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=True)        
 
 class LatentVisualDiffusion(LatentDiffusion):
     def __init__(self, img_cond_stage_config, image_proj_stage_config, freeze_embedder=True, image_proj_model_trainable=True, action_emb=False, action_dropout_prob=0.0, action_random_drop_btw_timestep=False, *args, **kwargs):

@@ -16,9 +16,16 @@ import scipy
 
 from pytorch_fid.fid_score import calculate_frechet_distance
 
+# Try to import wandb - optional dependency
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
 class ImageLogger(Callback):
     def __init__(self, batch_frequency, max_images=8, clamp=True, rescale=True, save_dir=None, \
-                to_local=False, log_images_kwargs=None):
+                to_local=False, log_images_kwargs=None, log_to_wandb=True, num_wandb_videos=4):
         super().__init__()
         self.rescale = rescale
         self.batch_freq = batch_frequency
@@ -26,6 +33,8 @@ class ImageLogger(Callback):
         self.to_local = to_local
         self.clamp = clamp
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
+        self.log_to_wandb = log_to_wandb and WANDB_AVAILABLE
+        self.num_wandb_videos = num_wandb_videos
         if self.to_local:
             ## default save dir
             self.save_dir = os.path.join(save_dir, "images")
@@ -33,16 +42,25 @@ class ImageLogger(Callback):
             os.makedirs(os.path.join(self.save_dir, "val"), exist_ok=True)
 
     def log_to_tensorboard(self, pl_module, batch_logs, filename, split, save_fps=3): # rt-1 should be fps=3
-        """ log images and videos to tensorboard """        
+        """ log images and videos to tensorboard """
         global_step = pl_module.global_step
         # dict_keys(['image_condition', 'reconst', 'condition', 'samples'])
-        
+
+        # Get the appropriate logger (handle multiple loggers case)
+        logger = pl_module.logger
+        if isinstance(logger, list):
+            # Find the tensorboard logger
+            for l in logger:
+                if hasattr(l, 'experiment') and hasattr(l.experiment, 'add_video'):
+                    logger = l
+                    break
+
         for key in batch_logs:
             value = batch_logs[key]
             tag = "gs%d-%s/%s-%s"%(global_step, split, filename, key)
             if isinstance(value, list) and isinstance(value[0], str):
                 captions = ' |------| '.join(value)
-                pl_module.logger.experiment.add_text(tag, captions, global_step=global_step)
+                logger.experiment.add_text(tag, captions, global_step=global_step)
             elif isinstance(value, torch.Tensor) and value.dim() == 5:
                 video = value
                 n = video.shape[0]
@@ -51,22 +69,88 @@ class ImageLogger(Callback):
                 grid = torch.stack(frame_grids, dim=0) # stack in temporal dim [t, 3, n*h, w]
                 grid = (grid + 1.0) / 2.0
                 grid = grid.unsqueeze(dim=0)
-                pl_module.logger.experiment.add_video(tag, grid, fps=save_fps, global_step=global_step)
+                logger.experiment.add_video(tag, grid, fps=save_fps, global_step=global_step)
             elif isinstance(value, torch.Tensor) and value.dim() == 4:
                 img = value
                 grid = torchvision.utils.make_grid(img, nrow=int(n), padding=0)
                 grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
-                pl_module.logger.experiment.add_image(tag, grid, global_step=global_step)
+                logger.experiment.add_image(tag, grid, global_step=global_step)
             else:
                 pass
+
+    def log_videos_to_wandb(self, pl_module, batch_logs, batch, split, save_fps=3):
+        """
+        Log comparison videos to wandb as a single grid video.
+
+        Creates a grid video with rows for each sample showing:
+        - Ground Truth (GT) | Model Prediction | Conditioning Frame (repeated)
+        """
+        if not WANDB_AVAILABLE or wandb.run is None:
+            return
+
+        global_step = pl_module.global_step
+
+        # Get samples and ground truth
+        samples = batch_logs.get('samples')  # Model predictions [B, C, T, H, W]
+        gt_video = batch.get('video')  # Ground truth [B, C, T, H, W]
+
+        if samples is None or gt_video is None:
+            return
+
+        # Limit number of videos to log
+        num_videos = min(self.num_wandb_videos, samples.shape[0], gt_video.shape[0])
+
+        # Normalize from [-1, 1] to [0, 255] uint8
+        def normalize_video(v):
+            v = v.clamp(-1, 1)
+            v = (v + 1.0) / 2.0  # [0, 1]
+            v = (v * 255).to(torch.uint8)
+            return v
+
+        rows = []
+        for i in range(num_videos):
+            # Get individual sample and gt
+            pred = samples[i]  # [C, T, H, W]
+            gt = gt_video[i]  # [C, T, H, W]
+
+            # Get conditioning frame (frame 0, repeated T times)
+            cond_frame = gt[:, 0:1, :, :]  # [C, 1, H, W]
+            cond_repeated = cond_frame.repeat(1, pred.shape[1], 1, 1)  # [C, T, H, W]
+
+            pred_norm = normalize_video(pred.cpu())
+            gt_norm = normalize_video(gt.cpu())
+            cond_norm = normalize_video(cond_repeated.cpu())
+
+            # Create side-by-side comparison for this row [C, T, H, W*3]
+            # Layout: GT | Prediction | Condition
+            row = torch.cat([gt_norm, pred_norm, cond_norm], dim=3)  # [C, T, H, W*3]
+            rows.append(row)
+
+        # Stack all rows vertically [C, T, H*num_videos, W*3]
+        grid_video = torch.cat(rows, dim=2)  # Stack along height dimension
+
+        # Wandb expects [T, C, H, W] for video
+        grid_video = grid_video.permute(1, 0, 2, 3).numpy()  # [T, C, H*num_videos, W*3]
+
+        # Log single combined video to wandb
+        video_key = f"{split}/comparison_video"
+        wandb.log({
+            video_key: wandb.Video(
+                grid_video,
+                fps=save_fps,
+                format="mp4",
+                caption=f"GT | Pred | Cond (step {global_step}, {num_videos} samples)"
+            )
+        })
+        mainlogger.info(f"Logged grid video ({num_videos} samples) to wandb at step {global_step}")
 
     @rank_zero_only
     def log_batch_imgs(self, pl_module, batch, batch_idx, split="train"):
         """ generate images, then save and log to tensorboard """
-        skip_freq = self.batch_freq if split == "train" else 5000
-        # Reminder: if the training log does not contain logged videos, it might be due to:
-        # the local batch size is smaller than skip_freq
-        if (batch_idx+1) % skip_freq == 0 or split == "val": # log all videos in validation set
+        # Use global_step for frequency check - same frequency for train and val
+        global_step = pl_module.global_step
+        # Only log videos every batch_freq steps (e.g., 250) for both train and val
+        if global_step > 0 and global_step % self.batch_freq == 0:
             is_train = pl_module.training
             if is_train:
                 pl_module.eval()
@@ -100,6 +184,12 @@ class ImageLogger(Callback):
                 mainlogger.info("Log [%s] batch <%s> to tensorboard ..."%(split, filename))
                 batch_logs['video'] = batch['video']
                 self.log_to_tensorboard(pl_module, batch_logs, filename, split, save_fps=3)
+
+            # Log videos to wandb if enabled (for both train and val)
+            if self.log_to_wandb:
+                mainlogger.info("Log [%s] videos to wandb ..."%(split))
+                self.log_videos_to_wandb(pl_module, batch_logs, batch, split, save_fps=3)
+
             mainlogger.info('Finish!')
 
             if is_train:
@@ -121,33 +211,40 @@ class ImageLogger(Callback):
 
 class CUDACallback(Callback):
     # see https://github.com/SeanNaren/minGPT/blob/master/mingpt/callback.py
+    def _get_gpu_index(self, trainer):
+        """Get GPU index compatible with Lightning 2.x"""
+        try:
+            # Lightning 2.x
+            return trainer.strategy.root_device.index
+        except AttributeError:
+            # Fallback for older versions
+            return getattr(trainer, 'root_gpu', 0)
+
     def on_train_epoch_start(self, trainer, pl_module):
         # Reset the memory use counter
-        # lightning update
-        if int((pl.__version__).split('.')[1])>=7:
-            gpu_index = trainer.strategy.root_device.index
-        else:
-            gpu_index = trainer.root_gpu
-        torch.cuda.reset_peak_memory_stats(gpu_index)
-        torch.cuda.synchronize(gpu_index)
+        gpu_index = self._get_gpu_index(trainer)
+        if gpu_index is not None:
+            torch.cuda.reset_peak_memory_stats(gpu_index)
+            torch.cuda.synchronize(gpu_index)
         self.start_time = time.time()
 
     def on_train_epoch_end(self, trainer, pl_module):
-        if int((pl.__version__).split('.')[1])>=7:
-            gpu_index = trainer.strategy.root_device.index
+        gpu_index = self._get_gpu_index(trainer)
+        if gpu_index is not None:
+            torch.cuda.synchronize(gpu_index)
+            max_memory = torch.cuda.max_memory_allocated(gpu_index) / 2 ** 20
         else:
-            gpu_index = trainer.root_gpu
-        torch.cuda.synchronize(gpu_index)
-        max_memory = torch.cuda.max_memory_allocated(gpu_index) / 2 ** 20
+            max_memory = 0
         epoch_time = time.time() - self.start_time
 
         try:
-            max_memory = trainer.training_type_plugin.reduce(max_memory)
-            epoch_time = trainer.training_type_plugin.reduce(epoch_time)
-
+            # Try Lightning 2.x method first
+            if hasattr(trainer.strategy, 'reduce'):
+                max_memory = trainer.strategy.reduce(torch.tensor(max_memory)).item()
+                epoch_time = trainer.strategy.reduce(torch.tensor(epoch_time)).item()
             rank_zero_info(f"Average Epoch time: {epoch_time:.2f} seconds")
             rank_zero_info(f"Average Peak memory {max_memory:.2f}MiB")
-        except AttributeError:
+        except (AttributeError, Exception):
             pass
 
 class MetricsLogger(Callback):
